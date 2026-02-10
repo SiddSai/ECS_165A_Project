@@ -1,2 +1,2 @@
 Hello!
-This is EEC 165A project
+This is ECS 165A project
