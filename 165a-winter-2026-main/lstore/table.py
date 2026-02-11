@@ -84,7 +84,7 @@ class Table:
         # update index with new rid and key value
         key_value = record.columns[self.key]
         self.index.insert(key_value, rid) # no insert method yet for index?
-        pass
+        return True
 
     # future: implement read_latest()
     def read(self, rid):
@@ -128,13 +128,21 @@ class Table:
         
         (range_id, is_tail, page_id, offset) = self.page_directory[base_rid]
         base_bundle = self.base_pages[page_id]
-        latest_tail_rid = base_bundle[INDIRECTION_COLUMN].read(offset)
-        if latest_tail_rid == NULL_RID:
+        prev_tail_rid = base_bundle[INDIRECTION_COLUMN].read(offset)
+        if prev_tail_rid == NULL_RID:
             current_values = base_record.columns
         else:
-            tail_record = self.read(latest_tail_rid)
+            tail_record = self.read(prev_tail_rid)
             current_values = tail_record.columns
 
+        # bit vector to track which columns are updated
+        update_mask = 0
+        for i in range(self.num_columns):
+            if columns[i] is not None:
+                update_mask |= (1 << i)
+        if update_mask == 0:
+            return False
+        
         # create new tail record with updated values
         new_values = current_values.copy()
         for i in range(self.num_columns):
@@ -148,19 +156,24 @@ class Table:
         if (len(tails) == 0) or (not tails[-1][RID_COLUMN].has_capacity()):
             bundle = [Page() for col in range(self.num_columns + 4)]
             tails.append(bundle)
-        for col in range(self.num_columns):
-            tails[-1][col + 4].write(new_values[col])
-        tails[-1][INDIRECTION_COLUMN].write(base_rid)
-        tail_offset = tails[-1][RID_COLUMN].write(new_tail_rid)
-        tails[-1][TIMESTAMP_COLUMN].write(int(time()))
-        tails[-1][SCHEMA_ENCODING_COLUMN].write(1) # columns updated
+        
+        # write new tail record
+        tail_bundle = self.tail_pages[-1]
+        tail_offset = tail_bundle[RID_COLUMN].write(new_tail_rid)
+        tail_bundle[INDIRECTION_COLUMN].write(prev_tail_rid) # point to previous tail record
+        tail_bundle[TIMESTAMP_COLUMN].write(int(time()))
+        tail_bundle[SCHEMA_ENCODING_COLUMN].write(update_mask) # columns updated
 
+        for col in range(self.num_columns):
+            tail_bundle[col + 4].write(new_values[col])
         tail_page_id = len(self.tail_pages) - 1
         self.page_directory[new_tail_rid] = (0, True, tail_page_id, tail_offset)
 
-        base_record[INDIRECTION_COLUMN].write(new_tail_rid) # update indirection to point to latest tail record
-        base_record[SCHEMA_ENCODING_COLUMN].write(base_record[SCHEMA_ENCODING_COLUMN].read(offset) | 1) # update schema encoding to indicate column updated
-        pass
+        base_bundle[INDIRECTION_COLUMN].update(offset, new_tail_rid) # update indirection to point to latest tail record
+        old_schema = base_bundle[SCHEMA_ENCODING_COLUMN].read(offset)
+        base_schema = old_schema | update_mask
+        base_bundle[SCHEMA_ENCODING_COLUMN].update(offset, base_schema) # update schema encoding to indicate column updated
+        return True
 
     def delete(self, rid):
         # Mark the record with the given RID as deleted by updating the appropriate page and page directory entry.
