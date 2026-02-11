@@ -79,6 +79,9 @@ class Table:
         self.page_directory[rid] = (range_id, is_tail, page_id, offset)
 
         # update index with new rid and key value
+        existing = self.index.locate(self.key, record.columns[self.key])
+        if existing is not None:
+            return False # duplicate key, insertion fails
         key_value = record.columns[self.key]
         self.index.insert(key_value, rid) # no insert method yet for index?
         return True
