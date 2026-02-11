@@ -126,6 +126,7 @@ class Query:
 
             base_rid = rids[0]
             return bool(self.table.update(base_rid, list(columns)))
+
         except Exception:
             return False
     """

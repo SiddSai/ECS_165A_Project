@@ -80,8 +80,8 @@ class Table:
 
         # update index with new rid and key value
         existing = self.index.locate(self.key, record.columns[self.key])
-        if existing is not None:
-            return False # duplicate key, insertion fails
+        if existing:  # 只有找到已有 rid 才算重复键
+            return False
         key_value = record.columns[self.key]
         self.index.insert(key_value, rid) # no insert method yet for index?
         return True
