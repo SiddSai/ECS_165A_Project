@@ -112,7 +112,7 @@ class Table:
 
     def update(self, primary_key, updated_columns):
         # Update the record with the given RID by writing the updated values to a new tail page and updating the page directory and index accordingly.
-        if len(columns) != self.num_columns:
+        if len(updated_columns) != self.num_columns:
             return False
         
         # find base rid using index on primary key
@@ -137,8 +137,8 @@ class Table:
         # create new tail record with updated values
         new_values = current_values.copy()
         for i in range(self.num_columns):
-            if columns[i] is not None:
-                new_values[i] = columns[i]
+            if updated_columns[i] is not None:
+                new_values[i] = updated_columns[i]
         new_tail_rid = self.next_tail_rid
         self.next_tail_rid += 1
         
