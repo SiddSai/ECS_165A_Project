@@ -45,6 +45,40 @@ class Table:
         self.base_pages = []
         self.tail_pages = []
 
+    def _read_at_rid(self, rid):
+        """Read record at specific RID without following indirection"""
+        if rid not in self.page_directory:
+            return None
+        range_id, is_tail, page_id, offset = self.page_directory[rid]
+        bundle = self.tail_pages[page_id] if is_tail else self.base_pages[page_id]
+
+        columns = []
+        for col in range(self.num_columns):
+            value = bundle[col + 4].read(offset)
+            columns.append(value)
+
+        return Record(rid, columns[self.key], columns)
+
+    def _read_without_indirection(self, rid):
+        """Read record at specified RID without following indirection pointer"""
+        if rid not in self.page_directory:
+            return None
+
+        range_id, is_tail, page_id, offset = self.page_directory[rid]
+
+        if is_tail:
+            bundle = self.tail_pages[page_id]
+        else:
+            bundle = self.base_pages[page_id]
+
+        # Read all columns
+        columns = []
+        for col in range(self.num_columns):
+            value = bundle[col + 4].read(offset)
+            columns.append(value)
+
+        key_value = columns[self.key]
+        return Record(rid, key_value, columns)
 
     def insert(self, record):
         # generate new rid
@@ -113,11 +147,13 @@ class Table:
             return self.read(indirection)
 
         return Record(rid, key_value, columns)
-        
 
     def update(self, rid, columns):
         # rid is the BASE rid (Query passes rid, *columns)
         if len(columns) != self.num_columns:
+            return False
+
+        if columns[self.key] is not None:
             return False
 
         # make sure rid exists

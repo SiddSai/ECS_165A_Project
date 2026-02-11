@@ -103,8 +103,73 @@ class Query:
 
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         try:
-            # Milestone 1: ignore versioning, always return latest
-            return self.select(search_key, search_key_index, projected_columns_index)
+            if relative_version == 0:
+                return self.select(search_key, search_key_index, projected_columns_index)
+
+            rids = self.table.index.locate(search_key_index, search_key)
+            if not rids:
+                return False
+
+            results = []
+            for base_rid in rids:
+                if base_rid not in self.table.page_directory:
+                    continue
+
+                range_id, is_tail, page_id, offset = self.table.page_directory[base_rid]
+                if is_tail:
+                    continue
+
+                base_bundle = self.table.base_pages[page_id]
+                latest_tail_rid = base_bundle[0].read(offset)
+
+                # Start from latest tail (version 0) and skip forward
+                current_rid = latest_tail_rid
+
+                # Skip forward abs(relative_version) - 1 times
+                # Because we want version -1 to be one step BACK from version 0
+                steps = abs(relative_version)
+
+                for _ in range(steps):
+                    if current_rid == -1:
+                        # No more history, use base record
+                        current_rid = base_rid
+                        break
+                    if current_rid == -5:
+                        break
+                    if current_rid not in self.table.page_directory:
+                        current_rid = base_rid
+                        break
+
+                    t_range, t_is_tail, t_page_id, t_offset = self.table.page_directory[current_rid]
+
+                    if not t_is_tail:
+                        # Already at base
+                        break
+
+                    tail_bundle = self.table.tail_pages[t_page_id]
+                    next_rid = tail_bundle[0].read(t_offset)
+
+                    if next_rid == -1:
+                        # Next is base record
+                        current_rid = base_rid
+                        break
+                    else:
+                        current_rid = next_rid
+
+                # Read record at current_rid
+                rec_obj = self.table._read_without_indirection(current_rid)
+
+                if rec_obj is None:
+                    continue
+
+                projected = [None] * self.table.num_columns
+                for i in range(self.table.num_columns):
+                    if projected_columns_index[i] == 1:
+                        projected[i] = rec_obj.columns[i]
+
+                results.append(Record(base_rid, rec_obj.key, projected))
+
+            return results if results else False
         except Exception:
             return False
 
@@ -178,11 +243,29 @@ class Query:
 
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
         try:
-            # Milestone 1: ignore versioning, always return latest
-            return self.sum(start_range, end_range, aggregate_column_index)
+            total = 0
+            found_any = False
+
+            projection = [0] * self.table.num_columns
+            projection[aggregate_column_index] = 1
+
+            for key in range(start_range, end_range + 1):
+                recs = self.select_version(key, self.table.key, projection, relative_version)
+
+
+                if recs is False:
+                    continue
+
+                if len(recs) > 0:
+                    found_any = True
+                    value = recs[0].columns[aggregate_column_index]
+
+                    if value is not None:
+                        total += value
+
+            return total if found_any else False
         except Exception:
             return False
-
     """
     incremenets one column of the record
     this implementation should work if your select and update queries already work
