@@ -44,7 +44,6 @@ class Table:
 
         self.base_pages = []
         self.tail_pages = []
-        pass
 
     """
     if time: skeleton might expect insert to return True/False for success (method currently ends with pass). replace with a return (dependent on query)
@@ -111,63 +110,43 @@ class Table:
         return Record(rid, key_value, columns)
         
 
-    def update(self, primary_key, columns):
-        # Update the record with the given key by writing the updated values to a new tail page and updating the page directory and index accordingly.
+    def update(self, primary_key, updated_columns):
+        # Update the record with the given RID by writing the updated values to a new tail page and updating the page directory and index accordingly.
         if len(columns) != self.num_columns:
             return False
-        
-        # find base rid using index on primary key
-        base_rids = self.index.locate(self.key, primary_key)
-        if not base_rids:
-            return False
-        base_rid = base_rids[0] # assume primary key is unique
-
-        base_record = self.read(base_rid)
-        if base_record is None:
-            return False
-        
-        (range_id, is_tail, page_id, offset) = self.page_directory[base_rid]
-        base_bundle = self.base_pages[page_id]
-        latest_tail_rid = base_bundle[INDIRECTION_COLUMN].read(offset)
-        if latest_tail_rid == NULL_RID:
-            current_values = base_record.columns
-        else:
-            tail_record = self.read(latest_tail_rid)
-            current_values = tail_record.columns
-
-        # create new tail record with updated values
-        new_values = current_values.copy()
-        for i in range(self.num_columns):
-            if columns[i] is not None:
-                new_values[i] = columns[i]
-        new_tail_rid = self.next_tail_rid
-        self.next_tail_rid += 1
-        
-        # if no tail pages exist or current tail page is full, create new tail page
-        tails = self.tail_pages
-        if (len(tails) == 0) or (not tails[-1][RID_COLUMN].has_capacity()):
-            bundle = [Page() for col in range(self.num_columns + 4)]
-            tails.append(bundle)
-        for col in range(self.num_columns):
-            tails[-1][col + 4].write(new_values[col])
-        tails[-1][INDIRECTION_COLUMN].write(base_rid)
-        tail_offset = tails[-1][RID_COLUMN].write(new_tail_rid)
-        tails[-1][TIMESTAMP_COLUMN].write(int(time()))
-        tails[-1][SCHEMA_ENCODING_COLUMN].write(1) # columns updated
-
-        tail_page_id = len(self.tail_pages) - 1
-        self.page_directory[new_tail_rid] = (0, True, tail_page_id, tail_offset)
-
-        base_record[INDIRECTION_COLUMN].write(new_tail_rid) # update indirection to point to latest tail record
-        base_record[SCHEMA_ENCODING_COLUMN].write(base_record[SCHEMA_ENCODING_COLUMN].read(offset) | 1) # update schema encoding to indicate column updated
         pass
-
+    
+    # Constant for deletion flag
+    deleted = -5
     def delete(self, rid):
         # Mark the record with the given RID as deleted by updating the appropriate page and page directory entry.
-        pass
+        if rid not in self.page_directory:
+            return False
+        
+        # Get location
+        range_id, is_tail, page_id, offset = self.page_directory[rid]
+
+        # Get page bundle
+        pg_bundle =  self.tail_pages[page_id] if is_tail else self.base_pages[page_id]
+
+        # Read key value for index deletion
+        key_value = pg_bundle[self.key + 4].read(offset)
+
+        # Mark as deleted with deletion flag
+        pg_bundle[INDIRECTION_COLUMN].update(offset, self.deleted)
+
+        # Remove from index
+        self.index.delete(key_value, rid)
+
+        # Remove page directory entry
+        del self.page_directory[rid]
+
+        return True
 
     # do last
     def __merge(self):
         print("merge is happening")
+        limit = self.merge_threshold_pages
+        # check if merge is needed
         pass
  
