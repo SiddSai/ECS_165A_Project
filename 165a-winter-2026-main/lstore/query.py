@@ -114,11 +114,15 @@ class Query:
         try:
             if len(columns) != self.table.num_columns:
                 return False
-            return bool(self.table.update(primary_key, list(columns)))
 
+            rids = self.table.index.locate(self.table.key, primary_key)
+            if not rids:
+                return False
+
+            base_rid = rids[0]
+            return bool(self.table.update(base_rid, list(columns)))
         except Exception:
             return False
-
     """
     :param start_range: int         # Start of the key range to aggregate 
     :param end_range: int           # End of the key range to aggregate 
