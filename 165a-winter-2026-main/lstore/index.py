@@ -5,7 +5,7 @@ A data strucutre holding indices for various columns of a table. Key column shou
 class Index:
 
     def __init__(self, table):
-        # One index for each table. All our empty initially.
+        # One index for each table. All are empty initially.
         self.indices = [None] *  table.num_columns
         self.table = table
 
@@ -13,7 +13,7 @@ class Index:
         self.indices[table.key] = {}
 
     """
-    # returns the location of all records with the given value on column "column"
+    # returns the location of all records with the given value in column "column"
     """
 
     def locate(self, column, value):
@@ -34,6 +34,30 @@ class Index:
         for value in self.indices[column]:
             if begin <= value <= end:
                 result.extend(self.indices[column][value])
+        return result
+    
+    """
+    Helpers according to table.py code
+    """
+
+    """
+    Insert key value and rid into index.
+    """
+    def insert(self, key_value, rid):
+        if self.indices[self.table.key] is not None:
+            if key_value not in self.indices[self.table.key]:
+                self.indices[self.table.key][key_value] = []
+            self.indices[self.table.key][key_value].append(rid)
+    
+    """
+    Delete key value and rid from index.
+    """
+    def delete(self, key_value, rid):
+        if self.indices[self.table.key] is not None:
+            if key_value in self.indices[self.table.key]:
+                if rid in self.indices[self.table.key][key_value]:
+                    self.indices[self.table.key][key_value].remove(rid)
+
 
     """
     # optional: Create index on specific column
