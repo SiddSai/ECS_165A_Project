@@ -45,9 +45,7 @@ class Table:
         self.base_pages = []
         self.tail_pages = []
 
-    """
-    if time: skeleton might expect insert to return True/False for success (method currently ends with pass). replace with a return (dependent on query)
-    """
+
     def insert(self, record):
         # generate new rid
         rid = self.next_rid
@@ -107,59 +105,88 @@ class Table:
             columns.append(value)
         key_value = columns[self.key]
 
+        # Follow indirection if not null and not deleted to get latest version of record
+        if not is_tail and indirection != self.deleted and indirection != NULL_RID:
+            return self.read(indirection)
+
         return Record(rid, key_value, columns)
         
 
-    def update(self, primary_key, updated_columns):
-        # Update the record with the given RID by writing the updated values to a new tail page and updating the page directory and index accordingly.
-        if len(updated_columns) != self.num_columns:
+    def update(self, rid, columns):
+        # rid is the BASE rid (Query passes rid, *columns)
+        if len(columns) != self.num_columns:
             return False
-        
-        # find base rid using index on primary key
-        base_rids = self.index.locate(self.key, primary_key)
-        if not base_rids:
+
+        # make sure rid exists
+        if rid not in self.page_directory:
             return False
-        base_rid = base_rids[0] # assume primary key is unique
+
+        (range_id, is_tail, page_id, offset) = self.page_directory[rid]
+
+        # updates should target base records, not tail records
+        if is_tail:
+            return False
+
+        base_rid = rid
+        base_bundle = self.base_pages[page_id]
 
         base_record = self.read(base_rid)
         if base_record is None:
             return False
-        
-        (range_id, is_tail, page_id, offset) = self.page_directory[base_rid]
-        base_bundle = self.base_pages[page_id]
-        latest_tail_rid = base_bundle[INDIRECTION_COLUMN].read(offset)
-        if latest_tail_rid == NULL_RID:
+
+        prev_tail_rid = base_bundle[INDIRECTION_COLUMN].read(offset)
+        if prev_tail_rid == NULL_RID:
             current_values = base_record.columns
         else:
-            tail_record = self.read(latest_tail_rid)
+            tail_record = self.read(prev_tail_rid)
+            if tail_record is None:
+                return False
             current_values = tail_record.columns
 
-        # create new tail record with updated values
+        # bit vector to track which columns are updated
+        update_mask = 0
+        for i in range(self.num_columns):
+            if columns[i] is not None:
+                update_mask |= (1 << i)
+        if update_mask == 0:
+            return False
+
+        # create new tail record with updated values (cumulative tails)
         new_values = current_values.copy()
         for i in range(self.num_columns):
-            if updated_columns[i] is not None:
-                new_values[i] = updated_columns[i]
+            if columns[i] is not None:
+                new_values[i] = columns[i]
+
         new_tail_rid = self.next_tail_rid
         self.next_tail_rid += 1
-        
-        # if no tail pages exist or current tail page is full, create new tail page
+
+        # if no tail pages exist or current tail page is full, create new tail page bundle
         tails = self.tail_pages
         if (len(tails) == 0) or (not tails[-1][RID_COLUMN].has_capacity()):
-            bundle = [Page() for col in range(self.num_columns + 4)]
+            bundle = [Page() for _ in range(self.num_columns + 4)]
             tails.append(bundle)
+
+        # write new tail record (aligned: one write per column page)
+        tail_bundle = self.tail_pages[-1]
+        tail_offset = tail_bundle[RID_COLUMN].write(new_tail_rid)
+        tail_bundle[INDIRECTION_COLUMN].write(prev_tail_rid)  # point to previous tail record
+        tail_bundle[TIMESTAMP_COLUMN].write(int(time()))
+        tail_bundle[SCHEMA_ENCODING_COLUMN].write(update_mask)
+
         for col in range(self.num_columns):
-            tails[-1][col + 4].write(new_values[col])
-        tails[-1][INDIRECTION_COLUMN].write(base_rid)
-        tail_offset = tails[-1][RID_COLUMN].write(new_tail_rid)
-        tails[-1][TIMESTAMP_COLUMN].write(int(time()))
-        tails[-1][SCHEMA_ENCODING_COLUMN].write(1) # columns updated
+            tail_bundle[col + 4].write(new_values[col])
 
         tail_page_id = len(self.tail_pages) - 1
         self.page_directory[new_tail_rid] = (0, True, tail_page_id, tail_offset)
 
-        base_record[INDIRECTION_COLUMN].write(new_tail_rid) # update indirection to point to latest tail record
-        base_record[SCHEMA_ENCODING_COLUMN].write(base_record[SCHEMA_ENCODING_COLUMN].read(offset) | 1) # update schema encoding to indicate column updated
-        pass
+        # update base metadata in-place
+        base_bundle[INDIRECTION_COLUMN].update(offset, new_tail_rid)
+        old_schema = base_bundle[SCHEMA_ENCODING_COLUMN].read(offset)
+        base_bundle[SCHEMA_ENCODING_COLUMN].update(offset, old_schema | update_mask)
+
+        return True
+
+
 
     deleted = -5
     def delete(self, rid):
