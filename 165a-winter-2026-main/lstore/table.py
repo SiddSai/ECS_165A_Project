@@ -157,8 +157,8 @@ class Table:
             if columns[i] is not None:
                 new_values[i] = columns[i]
 
-        new_tail_rid = self.next_tail_rid
-        self.next_tail_rid += 1
+        new_tail_rid = self.next_rid
+        self.next_rid += 1
 
         # if no tail pages exist or current tail page is full, create new tail page bundle
         tails = self.tail_pages
