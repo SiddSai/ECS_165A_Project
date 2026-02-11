@@ -23,12 +23,11 @@ class Query:
 
     def delete(self, primary_key):
         try:
-            # 只对主键列 locate
             rids = self.table.index.locate(self.table.key, primary_key)
             if not rids:
                 return False
 
-            rid = rids[0]  # 主键唯一
+            rid = rids[0]
             return bool(self.table.delete(rid))
         except Exception:
             return False
@@ -47,7 +46,6 @@ class Query:
             if any(v is None for v in columns):
                 return False
 
-            # 用 table.py 里的 Record（你现在 table.py 也定义了 Record）
             record = Record(None, columns[self.table.key], list(columns))
 
             ok = self.table.insert(record)
@@ -77,7 +75,7 @@ class Query:
                 if rec_obj is None:
                     continue
 
-                full_cols = rec_obj.columns  # ✅ 这里是关键
+                full_cols = rec_obj.columns
 
                 projected = [None] * self.table.num_columns
                 for i in range(self.table.num_columns):
@@ -116,17 +114,11 @@ class Query:
         try:
             if len(columns) != self.table.num_columns:
                 return False
+            return bool(self.table.update(primary_key, list(columns)))
 
-            rids = self.table.index.locate(self.table.key, primary_key)
-            if not rids:
-                return False
-            rid = rids[0]
-
-            return bool(self.table.update(rid, *columns))
         except Exception:
             return False
 
-    
     """
     :param start_range: int         # Start of the key range to aggregate 
     :param end_range: int           # End of the key range to aggregate 
@@ -140,18 +132,15 @@ class Query:
             total = 0
             found_any = False
 
-            # 需确认table 记录总列数的变量名
             projection = [0] * self.table.num_columns
             projection[aggregate_column_index] = 1
 
             for key in range(start_range, end_range + 1):
                 recs = self.select(key, self.table.key, projection)
 
-                # 1) 如果 select 失败（异常/锁等），按规范直接返回 False
                 if recs is False:
                     return False
 
-                # 2) 如果查到了记录
                 if len(recs) > 0:
                     found_any = True
                     value = recs[0].columns[aggregate_column_index]
@@ -164,8 +153,7 @@ class Query:
             else:
                 return False
 
-        except Exception as e:
-            print(f"Sum operation failed: {e}")
+        except Exception:
             return False
     
     """
@@ -180,7 +168,7 @@ class Query:
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
         pass
 
-    
+
     """
     incremenets one column of the record
     this implementation should work if your select and update queries already work
