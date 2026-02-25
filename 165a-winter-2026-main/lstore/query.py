@@ -69,8 +69,12 @@ class Query:
         try:
             rids = self.table.index.locate(search_key_index, search_key)
 
+            if not rids and self.table.index.indices[search_key_index] is None:
+                rids = self._full_scan(search_key, search_key_index)
+
             results = []
             for rid in rids:
+                # ... 剩下不变
                 rec_obj = self.table.read(rid)
                 if rec_obj is None:
                     continue
@@ -89,6 +93,17 @@ class Query:
         except Exception:
             return False
 
+    def _full_scan(self, search_key, search_key_index):
+        rids = []
+        for rid, (range_id, is_tail, page_id, offset) in self.table.page_directory.items():
+            if is_tail:
+                continue  # 只扫 base records
+            rec = self.table.read(rid)
+            if rec is None:
+                continue
+            if rec.columns[search_key_index] == search_key:
+                rids.append(rid)
+        return rids
     
     """
     # Read matching record with specified search key
