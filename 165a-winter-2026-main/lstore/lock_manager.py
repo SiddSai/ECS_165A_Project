@@ -100,9 +100,7 @@ class LockManager:
             self._lock_table.clear()
 
 
-# ---------------------------------------------------------------------------
-# Module-level singleton — one LockManager per database process
-# ---------------------------------------------------------------------------
+
 _global_lock_manager = LockManager()
 
 
