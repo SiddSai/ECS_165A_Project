@@ -6,27 +6,25 @@ LOCK_EXCLUSIVE = "X"
 
 class LockManager:
     """
-    Centralized lock manager implementing No-Wait 2PL.
+    Keeps track of who is locking which record.
 
-    Each record (RID) can have:
-      - Multiple shared (read) locks from different transactions, OR
-      - Exactly one exclusive (write) lock.
+    Two types of locks:
+      - Shared lock (read): multiple transactions can hold this at the same time
+      - Exclusive lock (write): only one transaction can hold this, nobody else can read or write
 
-    No-Wait: if a lock cannot be granted immediately, return False immediately.
-    The calling transaction must abort (and may retry later).
-
-    Thread safety: all state is protected by a single mutex.
+    No-Wait: if the lock you want is taken, we return False right away instead of waiting.
+    The transaction will abort and retry later. This way deadlocks can never happen.
     """
 
     def __init__(self):
         # rid -> {"holders": {txn_id: lock_type}, "exclusive_holder": txn_id or None}
         self._lock_table = {}
-        self._mutex = threading.Lock()
+        self._mutex = threading.Lock()  # protects the lock table from concurrent access
 
     def acquire_shared(self, rid, txn_id):
         """
-        Acquire a shared (read) lock on `rid` for `txn_id`.
-        Returns True on success, False on conflict (No-Wait).
+        Try to get a read lock on this record.
+        Returns True if successful, False if someone else is writing (No-Wait).
         """
         with self._mutex:
             entry = self._lock_table.get(rid)
@@ -37,11 +35,11 @@ class LockManager:
             holders = entry["holders"]
             exclusive_holder = entry["exclusive_holder"]
 
-            # Already holds any lock on this rid — OK
+            # already holding a lock on this record, no need to do anything
             if txn_id in holders:
                 return True
 
-            # Another txn holds exclusive — No-Wait: fail
+            # someone else is writing, we can't read right now
             if exclusive_holder is not None and exclusive_holder != txn_id:
                 return False
 
@@ -50,9 +48,9 @@ class LockManager:
 
     def acquire_exclusive(self, rid, txn_id):
         """
-        Acquire an exclusive (write) lock on `rid` for `txn_id`.
-        Returns True on success, False on conflict (No-Wait).
-        Supports upgrade from shared → exclusive if this txn is the sole holder.
+        Try to get a write lock on this record.
+        Returns True if successful, False if anyone else has any lock (No-Wait).
+        Also handles upgrading from a read lock to a write lock if we're the only reader.
         """
         with self._mutex:
             entry = self._lock_table.get(rid)
@@ -63,15 +61,15 @@ class LockManager:
             holders = entry["holders"]
             exclusive_holder = entry["exclusive_holder"]
 
-            # Already exclusive — idempotent
+            # already have the write lock
             if exclusive_holder == txn_id:
                 return True
 
-            # Another txn holds exclusive — fail
+            # someone else is writing
             if exclusive_holder is not None:
                 return False
 
-            # Check other shared holders (lock upgrade)
+            # someone else is reading, we can't write
             other_shared = [t for t in holders if t != txn_id]
             if other_shared:
                 return False
@@ -81,7 +79,7 @@ class LockManager:
             return True
 
     def release_all(self, txn_id):
-        """Release all locks held by txn_id. Called on commit or abort."""
+        """Drop all locks held by this transaction. Called when a transaction commits or aborts."""
         with self._mutex:
             to_clean = []
             for rid, entry in self._lock_table.items():
@@ -95,10 +93,9 @@ class LockManager:
                 del self._lock_table[rid]
 
     def reset(self):
-        """Clear all locks (for testing / database restart)."""
+        """Clear everything. Useful between test runs."""
         with self._mutex:
             self._lock_table.clear()
-
 
 
 _global_lock_manager = LockManager()
@@ -109,5 +106,5 @@ def get_lock_manager():
 
 
 def reset_lock_manager():
-    """Reset global lock manager state (useful between test runs)."""
+    """Reset the global lock manager between tests."""
     _global_lock_manager.reset()
