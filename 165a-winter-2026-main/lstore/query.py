@@ -1,19 +1,19 @@
-from lstore.table import Table, Record
+from lstore.table import Table, Record, USER_COL_OFFSET, RID_COLUMN, INDIRECTION_COLUMN, BASE_RID_COLUMN, NULL_RID
 from lstore.index import Index
 
 
 class Query:
     """
-    # Creates a Query object that can perform different queries on the specified table 
+    # Creates a Query object that can perform different queries on the specified table
     Queries that fail must return False
     Queries that succeed should return the result or True
     Any query that crashes (due to exceptions) should return False
     """
+
     def __init__(self, table):
         self.table = table
         pass
 
-    
     """
     # internal Method
     # Read a record with specified RID
@@ -31,8 +31,7 @@ class Query:
             return bool(self.table.delete(rid))
         except Exception:
             return False
-    
-    
+
     """
     # Insert a record with specified columns
     # Return True upon succesful insertion
@@ -54,7 +53,6 @@ class Query:
         except Exception:
             return False
 
-    
     """
     # Read matching record with specified search key
     # :param search_key: the value you want to search based on
@@ -74,7 +72,6 @@ class Query:
 
             results = []
             for rid in rids:
-                # ... 剩下不变
                 rec_obj = self.table.read(rid)
                 if rec_obj is None:
                     continue
@@ -97,14 +94,30 @@ class Query:
         rids = []
         for rid, (range_id, is_tail, page_id, offset) in self.table.page_directory.items():
             if is_tail:
-                continue  # 只扫 base records
+                continue
             rec = self.table.read(rid)
             if rec is None:
                 continue
             if rec.columns[search_key_index] == search_key:
                 rids.append(rid)
         return rids
-    
+
+    def _full_scan_base_rids(self, search_key, search_key_index):
+        """
+        Full scan returning base RIDs whose *latest* value matches search_key.
+        Used by select_version when no index exists for the search column.
+        """
+        rids = []
+        for rid, (range_id, is_tail, page_id, offset) in self.table.page_directory.items():
+            if is_tail:
+                continue
+            rec = self.table.read(rid)   # follows indirection to latest version
+            if rec is None:
+                continue
+            if rec.columns[search_key_index] == search_key:
+                rids.append(rid)
+        return rids
+
     """
     # Read matching record with specified search key
     # :param search_key: the value you want to search based on
@@ -122,6 +135,11 @@ class Query:
                 return self.select(search_key, search_key_index, projected_columns_index)
 
             rids = self.table.index.locate(search_key_index, search_key)
+
+            # Fall back to full scan if no index exists for this column (same as select())
+            if not rids and self.table.index.indices[search_key_index] is None:
+                rids = self._full_scan_base_rids(search_key, search_key_index)
+
             if not rids:
                 return False
 
@@ -134,22 +152,27 @@ class Query:
                 if is_tail:
                     continue
 
-                base_bundle = self.table.base_pages[page_id]
-                latest_tail_rid = base_bundle[0].read(offset)
+                # Read indirection from base bundle to get the latest tail RID
+                base_bundle = self.table._get_bundle(range_id, False, page_id)
+                latest_tail_rid = base_bundle[INDIRECTION_COLUMN].read(offset)
+                self.table._unpin_bundle(range_id, False, page_id, dirty=False)
 
-                # Start from latest tail (version 0) and skip forward
+                # Start from latest tail and step backwards.
+                # relative_version=-1 → step back once from latest_tail → reaches base (1 update case)
+                # relative_version=-2 → step back twice → also base if only 1 update
                 current_rid = latest_tail_rid
-
-                # Skip forward abs(relative_version) - 1 times
-                # Because we want version -1 to be one step BACK from version 0
                 steps = abs(relative_version)
 
+                # If the record has never been updated, all versions resolve to base
+                if current_rid == NULL_RID:
+                    current_rid = base_rid
+
                 for _ in range(steps):
-                    if current_rid == -1:
-                        # No more history, use base record
+                    if current_rid == NULL_RID:
+                        # No more history — use base record
                         current_rid = base_rid
                         break
-                    if current_rid == -5:
+                    if current_rid == self.table.deleted:
                         break
                     if current_rid not in self.table.page_directory:
                         current_rid = base_rid
@@ -161,19 +184,20 @@ class Query:
                         # Already at base
                         break
 
-                    tail_bundle = self.table.tail_pages[t_page_id]
-                    next_rid = tail_bundle[0].read(t_offset)
+                    # Step one version back by reading the tail's INDIRECTION pointer
+                    tail_bundle = self.table._get_bundle(t_range, True, t_page_id)
+                    next_rid = tail_bundle[INDIRECTION_COLUMN].read(t_offset)
+                    self.table._unpin_bundle(t_range, True, t_page_id, dirty=False)
 
-                    if next_rid == -1:
-                        # Next is base record
+                    if next_rid == NULL_RID:
+                        # Next pointer leads to base
                         current_rid = base_rid
                         break
                     else:
                         current_rid = next_rid
 
-                # Read record at current_rid
+                # Read the record at the resolved version without following indirection
                 rec_obj = self.table._read_without_indirection(current_rid)
-
                 if rec_obj is None:
                     continue
 
@@ -182,13 +206,12 @@ class Query:
                     if projected_columns_index[i] == 1:
                         projected[i] = rec_obj.columns[i]
 
-                results.append(Record(base_rid, rec_obj.key, projected))
+                results.append(Record(current_rid, rec_obj.key, projected))
 
             return results if results else False
         except Exception:
             return False
 
-    
     """
     # Update a record with specified key and columns
     # Returns True if update is succesful
@@ -209,6 +232,7 @@ class Query:
 
         except Exception:
             return False
+
     """
     :param start_range: int         # Start of the key range to aggregate 
     :param end_range: int           # End of the key range to aggregate 
@@ -217,35 +241,43 @@ class Query:
     # Returns the summation of the given range upon success
     # Returns False if no record exists in the given range
     """
+
     def sum(self, start_range, end_range, aggregate_column_index):
         try:
-            total = 0
-            found_any = False
-
-            projection = [0] * self.table.num_columns
-            projection[aggregate_column_index] = 1
-
-            for key in range(start_range, end_range + 1):
-                recs = self.select(key, self.table.key, projection)
-
-                if recs is False:
-                    return False
-
-                if len(recs) > 0:
-                    found_any = True
-                    value = recs[0].columns[aggregate_column_index]
-
-                    if value is not None:
-                        total += value
-
-            if found_any:
-                return total
-            else:
+            rids = self.table.index.locate_range(start_range, end_range, self.table.key)
+            if not rids:
                 return False
-
+            total = 0
+            # Physical column index for the target user column
+            col = aggregate_column_index + USER_COL_OFFSET
+            for rid in rids:
+                if rid not in self.table.page_directory:
+                    continue
+                range_id, is_tail, page_id, offset = self.table.page_directory[rid]
+                # Follow indirection to get latest value
+                if not is_tail:
+                    bundle = self.table._get_bundle(range_id, False, page_id)
+                    indirection = bundle[INDIRECTION_COLUMN].read(offset)
+                    if (indirection != NULL_RID and indirection != self.table.deleted
+                            and indirection in self.table.page_directory):
+                        self.table._unpin_bundle(range_id, False, page_id, dirty=False)
+                        r2, t2, p2, o2 = self.table.page_directory[indirection]
+                        tail_bundle = self.table._get_bundle(r2, True, p2)
+                        total += tail_bundle[col].read(o2)
+                        self.table._unpin_bundle(r2, True, p2, dirty=False)
+                        continue
+                    # No tail — read directly from base
+                    if indirection != self.table.deleted:
+                        total += bundle[col].read(offset)
+                    self.table._unpin_bundle(range_id, False, page_id, dirty=False)
+                else:
+                    bundle = self.table._get_bundle(range_id, True, page_id)
+                    total += bundle[col].read(offset)
+                    self.table._unpin_bundle(range_id, True, page_id, dirty=False)
+            return total
         except Exception:
             return False
-    
+
     """
     :param start_range: int         # Start of the key range to aggregate 
     :param end_range: int           # End of the key range to aggregate 
@@ -267,7 +299,6 @@ class Query:
             for key in range(start_range, end_range + 1):
                 recs = self.select_version(key, self.table.key, projection, relative_version)
 
-
                 if recs is False:
                     continue
 
@@ -281,6 +312,7 @@ class Query:
             return total if found_any else False
         except Exception:
             return False
+
     """
     incremenets one column of the record
     this implementation should work if your select and update queries already work
